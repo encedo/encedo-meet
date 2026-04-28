@@ -1,0 +1,38 @@
+import { mlKem768 } from '@noble/post-quantum/ml-kem';
+
+export interface MlKemKeypair {
+    publicKey: Uint8Array;
+    secretKey: Uint8Array;
+}
+
+export function generateKeypair(): MlKemKeypair {
+    const { publicKey, secretKey } = mlKem768.keygen();
+
+    return { publicKey, secretKey };
+}
+
+export function encapsulate(peerPublicKey: Uint8Array): { ciphertext: Uint8Array; sharedSecret: Uint8Array } {
+    const { cipherText: ciphertext, sharedSecret } = mlKem768.encapsulate(peerPublicKey);
+
+    return { ciphertext, sharedSecret };
+}
+
+export function decapsulate(ciphertext: Uint8Array, secretKey: Uint8Array): Uint8Array {
+    return mlKem768.decapsulate(ciphertext, secretKey);
+}
+
+export async function deriveMediaKey(sharedSecret: Uint8Array): Promise<Uint8Array> {
+    const keyMaterial = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, [ 'deriveBits' ]);
+    const bits = await crypto.subtle.deriveBits(
+        {
+            hash: 'SHA-256',
+            info: new TextEncoder().encode('encedo-meet-media-v1'),
+            name: 'HKDF',
+            salt: new Uint8Array(0)
+        },
+        keyMaterial,
+        128
+    );
+
+    return new Uint8Array(bits);
+}

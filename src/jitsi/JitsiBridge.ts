@@ -1,0 +1,53 @@
+declare const JitsiMeetExternalAPI: any;
+
+export type OlmMessageHandler = (from: string, type: string, payload: unknown) => void;
+export type ConferenceJoinedHandler = (myId: string) => void;
+export type ParticipantJoinedHandler = (participantId: string) => void;
+
+export class JitsiBridge {
+    private api: any;
+
+    constructor(container: HTMLElement, domain: string, roomName: string) {
+        this.api = new JitsiMeetExternalAPI(domain, {
+            configOverwrite: {
+                e2ee: {
+                    externallyManagedKey: true,
+                    externallyManagedSharedKey: true
+                }
+            },
+            parentNode: container,
+            roomName
+        });
+    }
+
+    onConferenceJoined(cb: ConferenceJoinedHandler) {
+        this.api.addListener('videoConferenceJoined', (e: any) => cb(e.id));
+    }
+
+    onParticipantJoined(cb: ParticipantJoinedHandler) {
+        this.api.addListener('participantJoined', (e: any) => cb(e.id));
+    }
+
+    onOlmMessage(cb: OlmMessageHandler) {
+        this.api.addListener('olmMessageReceived', (e: any) => cb(e.from, e.type, e.payload));
+    }
+
+    sendOlmMessage(participantId: string, type: string, payload: unknown) {
+        this.api.executeCommand('send-olm-message', participantId, type, JSON.stringify(payload));
+    }
+
+    setMediaKey(encryptionKey: Uint8Array, index: number) {
+        this.api.executeCommand('set-media-encryption-key', JSON.stringify({
+            encryptionKey: Array.from(encryptionKey),
+            index
+        }));
+    }
+
+    getMyUserId(): string {
+        return this.api.getMyUserId();
+    }
+
+    dispose() {
+        this.api.dispose();
+    }
+}
