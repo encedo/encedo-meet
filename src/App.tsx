@@ -1,12 +1,47 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { EncedoKeyProvider } from './encedo/EncedoKeyProvider';
 import { JitsiBridge } from './jitsi/JitsiBridge';
 
 const JITSI_DOMAIN = 'localhost:8080';
 const ROOM_NAME = 'testroom';
 
+function PanicOverlay() {
+    return (
+        <div style={ {
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.92)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+            gap: '16px',
+        } }>
+            <div style={ { fontSize: '48px' } }>🔴</div>
+            <div style={ {
+                color: '#fff',
+                fontSize: '20px',
+                fontWeight: 700,
+                textAlign: 'center',
+            } }>
+                Sesja nie została prawidłowo autoryzowana
+            </div>
+            <div style={ {
+                color: '#aaa',
+                fontSize: '14px',
+                textAlign: 'center',
+                maxWidth: '360px',
+            } }>
+                Połączenie zostało przerwane ze względów bezpieczeństwa.
+            </div>
+        </div>
+    );
+}
+
 export default function App() {
     const containerRef = useRef<HTMLDivElement>(null);
+    const [ panicked, setPanicked ] = useState(false);
 
     useEffect(() => {
         if (!containerRef.current) {
@@ -18,6 +53,7 @@ export default function App() {
 
         provider.onPanic(reason => {
             console.error('[encedo] PANIC — dropping call:', reason);
+            setPanicked(true);
         });
 
         bridge.onConferenceJoined(myId => {
@@ -40,9 +76,12 @@ export default function App() {
     }, []);
 
     return (
-        <div
-            ref={ containerRef }
-            style={ { height: '100vh', width: '100vw' } }
-        />
+        <>
+            <div
+                ref={ containerRef }
+                style={ { height: '100vh', width: '100vw' } }
+            />
+            { panicked && <PanicOverlay /> }
+        </>
     );
 }
