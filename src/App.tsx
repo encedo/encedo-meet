@@ -17,13 +17,19 @@ export default function App() {
         const provider = new EncedoKeyProvider(bridge);
 
         bridge.onConferenceJoined(myId => {
-            console.log('[Encedo] Conference joined, myId:', myId);
-            provider.start(myId);
+            const isDistributor = bridge.getParticipants().length === 0;
+            console.log('[encedo] Conference joined, myId:', myId, 'role:', isDistributor ? 'distributor' : 'joiner');
+            provider.start(myId, isDistributor);
         });
 
         bridge.onParticipantJoined(peerId => {
-            console.log('[Encedo] Participant joined:', peerId);
+            console.log('[encedo] Participant joined:', peerId);
             provider.onParticipantJoined(peerId);
+        });
+
+        bridge.onParticipantLeft(peerId => {
+            console.log('[encedo] Participant left:', peerId);
+            provider.onParticipantLeft(peerId);
         });
 
         return () => bridge.dispose();

@@ -3,6 +3,7 @@ declare const JitsiMeetExternalAPI: any;
 export type OlmMessageHandler = (from: string, type: string, payload: unknown) => void;
 export type ConferenceJoinedHandler = (myId: string) => void;
 export type ParticipantJoinedHandler = (participantId: string) => void;
+export type ParticipantLeftHandler = (participantId: string) => void;
 
 export class JitsiBridge {
     private api: any;
@@ -28,6 +29,10 @@ export class JitsiBridge {
         this.api.addListener('participantJoined', (e: any) => cb(e.id));
     }
 
+    onParticipantLeft(cb: ParticipantLeftHandler) {
+        this.api.addListener('participantLeft', (e: any) => cb(e.id));
+    }
+
     onOlmMessage(cb: OlmMessageHandler) {
         this.api.addListener('olmMessageReceived', (e: any) => cb(e.from, e.type, e.payload));
     }
@@ -41,6 +46,10 @@ export class JitsiBridge {
             exportedKey: Array.from(encryptionKey),
             index
         }));
+    }
+
+    getParticipants(): Array<{ participantId: string }> {
+        return this.api.getParticipantsInfo() ?? [];
     }
 
     getMyUserId(): string {
