@@ -20,7 +20,6 @@ export class JitsiBridge {
                     'chat',
                     'participants-pane', 'tileview', 'fullscreen',
                     'settings', 'hangup'
-                    // TODO: remove 'chat' when E2EE chat overlay is ready
                 ]
             },
             parentNode: container,
