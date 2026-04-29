@@ -33,12 +33,12 @@ export class JitsiBridge {
     }
 
     sendOlmMessage(participantId: string, type: string, payload: unknown) {
-        this.api.executeCommand('send-olm-message', participantId, type, JSON.stringify(payload));
+        this.api.executeCommand('sendOlmMessage', participantId, type, JSON.stringify(payload));
     }
 
     setMediaKey(encryptionKey: Uint8Array, index: number) {
-        this.api.executeCommand('set-media-encryption-key', JSON.stringify({
-            encryptionKey: Array.from(encryptionKey),
+        this.api.executeCommand('setMediaEncryptionKey', JSON.stringify({
+            exportedKey: Array.from(encryptionKey),
             index
         }));
     }

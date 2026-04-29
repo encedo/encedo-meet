@@ -1,8 +1,11 @@
 import { JitsiBridge } from '../jitsi/JitsiBridge';
-import { decapsulate, deriveMediaKey, encapsulate, generateKeypair, MlKemKeypair } from './mlKem';
+import type { MlKemKeypair } from './mlKem';
+import { decapsulate, deriveMediaKey, encapsulate, generateKeypair } from './mlKem';
 
 const MSG_PUB = 'encedo:kyber-pub';
 const MSG_CT = 'encedo:kyber-ct';
+const PUB_RETRY_INTERVAL_MS = 1000;
+const PUB_MAX_RETRIES = 10;
 
 export class EncedoKeyProvider {
     private bridge: JitsiBridge;
@@ -10,6 +13,7 @@ export class EncedoKeyProvider {
     private keypair: MlKemKeypair | null = null;
     private peerPubs = new Map<string, Uint8Array>();
     private keyIndex = 0;
+    private pendingPeers: string[] = [];
 
     constructor(bridge: JitsiBridge) {
         this.bridge = bridge;
@@ -23,20 +27,38 @@ export class EncedoKeyProvider {
 
         this.bridge.onOlmMessage(this._onOlmMessage.bind(this));
 
-        this.bridge.sendOlmMessage('', MSG_PUB, {
-            pub: Array.from(this.keypair.publicKey)
-        });
-
-        console.log('[Encedo] Broadcast ml_kem_pub');
+        // Drain peers that joined before we had a keypair
+        for (const peerId of this.pendingPeers) {
+            console.log('[Encedo] Draining pending peer', peerId);
+            this._sendPubWithRetry(peerId, PUB_MAX_RETRIES);
+        }
+        this.pendingPeers = [];
     }
 
     onParticipantJoined(peerId: string) {
         if (!this.keypair) {
+            console.log('[Encedo] Keypair not ready, queuing peer', peerId);
+            this.pendingPeers.push(peerId);
             return;
         }
+        this._sendPubWithRetry(peerId, PUB_MAX_RETRIES);
+    }
+
+    private _sendPubWithRetry(peerId: string, retriesLeft: number) {
+        if (!this.keypair || retriesLeft <= 0) {
+            return;
+        }
+
+        console.log('[Encedo] Sending ml_kem_pub to', peerId, `(retries left: ${retriesLeft})`);
         this.bridge.sendOlmMessage(peerId, MSG_PUB, {
             pub: Array.from(this.keypair.publicKey)
         });
+
+        setTimeout(() => {
+            if (!this.peerPubs.has(peerId)) {
+                this._sendPubWithRetry(peerId, retriesLeft - 1);
+            }
+        }, PUB_RETRY_INTERVAL_MS);
     }
 
     private async _onOlmMessage(from: string, type: string, payload: any) {
@@ -48,6 +70,9 @@ export class EncedoKeyProvider {
     }
 
     private async _handlePub(from: string, peerPub: Uint8Array) {
+        if (this.peerPubs.has(from)) {
+            return;
+        }
         console.log('[Encedo] Received ml_kem_pub from', from, 'pub size:', peerPub.length);
         this.peerPubs.set(from, peerPub);
 
