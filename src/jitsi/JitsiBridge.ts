@@ -62,6 +62,10 @@ export class JitsiBridge {
         return this.api.getMyUserId();
     }
 
+    hangup() {
+        this.api.executeCommand('hangup');
+    }
+
     dispose() {
         this.api.dispose();
     }

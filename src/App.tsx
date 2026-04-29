@@ -16,6 +16,10 @@ export default function App() {
         const bridge = new JitsiBridge(containerRef.current, JITSI_DOMAIN, ROOM_NAME);
         const provider = new EncedoKeyProvider(bridge);
 
+        provider.onPanic(reason => {
+            console.error('[encedo] PANIC — dropping call:', reason);
+        });
+
         bridge.onConferenceJoined(myId => {
             const currentPeerIds = bridge.getParticipants().map(p => p.participantId);
             console.log('[encedo] Conference joined, myId:', myId, 'peers:', currentPeerIds);

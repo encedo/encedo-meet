@@ -43,6 +43,8 @@ async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[
     return new Uint8Array(pt);
 }
 
+export type PanicHandler = (reason: string) => void;
+
 export class EncedoKeyProvider {
     private bridge: JitsiBridge;
     private myId = '';
@@ -61,12 +63,24 @@ export class EncedoKeyProvider {
     private peerWrapKeys = new Map<string, CryptoKey>();
     private pendingPeers: string[] = [];
 
+    private panicHandler: PanicHandler | null = null;
+
     private get isDistributor(): boolean {
         return this.distributorId === this.myId;
     }
 
     constructor(bridge: JitsiBridge) {
         this.bridge = bridge;
+    }
+
+    onPanic(cb: PanicHandler) {
+        this.panicHandler = cb;
+    }
+
+    private _panic(reason: string) {
+        console.error('[encedo] PANIC:', reason);
+        this.bridge.hangup();
+        this.panicHandler?.(reason);
     }
 
     start(myId: string, currentPeerIds: string[]) {
@@ -171,7 +185,7 @@ export class EncedoKeyProvider {
 
     private async _onOlmMessage(from: string, type: string, payload: any) {
         if (type === MSG_PUB) {
-            await this._handlePub(from, new Uint8Array(payload.pub));
+            await this._handlePub(from, new Uint8Array(payload.pub), payload.sig ?? null, payload.kid ?? null);
         } else if (type === MSG_CT) {
             await this._handleCt(from, new Uint8Array(payload.ct));
         } else if (type === MSG_ROOM_KEY) {
@@ -179,13 +193,23 @@ export class EncedoKeyProvider {
         }
     }
 
-    private async _handlePub(from: string, peerPub: Uint8Array) {
+    private async _handlePub(from: string, peerPub: Uint8Array, sig: string | null, kid: string | null) {
         if (!this.isDistributor || this.peerPubs.has(from)) return;
 
-        console.log('[encedo] Received kyber-pub from', from);
-        // TODO(hsm-attest): verify peerPub against payload.sig using payload.kid's HSM public key
-        //   peerHsmPub = await directory.lookup(payload.kid)
-        //   if (!verifyExdsa(peerHsmPub, payload.sig, peerPub || channelId || sessionNonce)) return;
+        console.log('[encedo] Received kyber-pub from', from, 'kid:', kid);
+
+        if (sig !== null && kid !== null) {
+            // TODO(hsm-attest): verify peerPub against sig using kid's HSM public key
+            //   const peerHsmPub = await directory.lookup(kid);
+            //   const valid = verifyExdsa(peerHsmPub, sig, concat(peerPub, channelId, sessionNonce));
+            //   if (!valid) { this._panic(`invalid HSM signature from ${from} (kid=${kid})`); return; }
+            console.log('[encedo] HSM signature present but verification not yet implemented — accepting');
+        } else {
+            // No signature — allowed only in dev/testing (no HSM connected).
+            // In production builds this should trigger PANIC.
+            console.warn('[encedo] WARNING: no HSM signature from', from, '— accepted (dev mode only)');
+        }
+
         this.peerPubs.set(from, peerPub);
 
         const { ciphertext, sharedSecret } = encapsulate(peerPub);
