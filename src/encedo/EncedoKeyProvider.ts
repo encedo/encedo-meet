@@ -30,6 +30,10 @@ async function encryptRoomKey(wrapKey: CryptoKey, roomKey: Uint8Array): Promise<
     return { wrapped: Array.from(new Uint8Array(ct)), iv: Array.from(iv) };
 }
 
+function toHex(b: Uint8Array): string {
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
 async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[]): Promise<Uint8Array> {
     const pt = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: new Uint8Array(iv) },
@@ -43,70 +47,105 @@ export class EncedoKeyProvider {
     private bridge: JitsiBridge;
     private myId = '';
     private keypair: MlKemKeypair | null = null;
-    private isDistributor = false;
+
+    // Participant tracking — distributorId is always min(participantIds)
+    private participantIds = new Set<string>();
+    private distributorId = '';
+
     private roomKey: Uint8Array | null = null;
+    // keyIndex tracks the next available slot. Current active epoch = keyIndex - 1.
+    // All participants must set the same epoch for SFrame to match during decryption.
     private keyIndex = 0;
 
-    // peerWrapKeys: wrap key derived from ML-KEM shared secret with each peer
     private peerPubs = new Map<string, Uint8Array>();
     private peerWrapKeys = new Map<string, CryptoKey>();
     private pendingPeers: string[] = [];
+
+    private get isDistributor(): boolean {
+        return this.distributorId === this.myId;
+    }
 
     constructor(bridge: JitsiBridge) {
         this.bridge = bridge;
     }
 
-    start(myId: string, isDistributor: boolean) {
+    start(myId: string, currentPeerIds: string[]) {
         this.myId = myId;
-        this.isDistributor = isDistributor;
         this.keypair = generateKeypair();
+        this.participantIds = new Set([myId, ...currentPeerIds]);
+        this.distributorId = this._lowestId();
 
-        console.log('[encedo] keypair generated, role:', isDistributor ? 'distributor' : 'joiner');
-
-        if (isDistributor) {
-            this.roomKey = crypto.getRandomValues(new Uint8Array(16));
-            this._applyRoomKey();
-        }
+        console.log('[encedo] start myId:', myId, 'distributor:', this.distributorId);
 
         this.bridge.onOlmMessage(this._onOlmMessage.bind(this));
 
+        if (this.isDistributor) {
+            this.roomKey = crypto.getRandomValues(new Uint8Array(32));
+            this._setKey(this.keyIndex++);
+        } else {
+            this._sendPubWithRetry(this.distributorId, PUB_MAX_RETRIES);
+        }
+
         for (const peerId of this.pendingPeers) {
-            console.log('[encedo] Draining pending peer', peerId);
-            this._sendPubWithRetry(peerId, PUB_MAX_RETRIES);
+            this.onParticipantJoined(peerId);
         }
         this.pendingPeers = [];
     }
 
     onParticipantJoined(peerId: string) {
         if (!this.keypair) {
-            console.log('[encedo] Keypair not ready, queuing peer', peerId);
             this.pendingPeers.push(peerId);
             return;
         }
 
-        if (this.isDistributor) {
-            // Generate new room key and distribute to existing peers.
-            // The new peer will send us their kyber-pub and get the key via _handlePub.
-            this._rekeyAndDistribute(peerId);
-        } else {
-            // Send our pub to every peer — only the distributor will respond with ct+room-key.
-            this._sendPubWithRetry(peerId, PUB_MAX_RETRIES);
+        const prevDistributorId = this.distributorId;
+        this.participantIds.add(peerId);
+        this.distributorId = this._lowestId();
+
+        if (this.isDistributor && prevDistributorId === this.myId) {
+            this._rekey(`join ${peerId}`);
+        } else if (prevDistributorId !== this.distributorId) {
+            // Distributor changed because new peer has lower ID
+            this._sendPubWithRetry(this.distributorId, PUB_MAX_RETRIES);
         }
     }
 
     onParticipantLeft(peerId: string) {
-        if (!this.isDistributor || !this.peerWrapKeys.has(peerId)) return;
-
-        console.log('[encedo] Participant left:', peerId, '— rekeying');
+        const prevDistributorId = this.distributorId;
+        this.participantIds.delete(peerId);
         this.peerPubs.delete(peerId);
         this.peerWrapKeys.delete(peerId);
-        this._rekeyAndDistribute(null);
+        this.distributorId = this._lowestId();
+
+        if (peerId === prevDistributorId) {
+            if (this.isDistributor) {
+                console.log('[encedo] Distributor left — I take over');
+                this._takeOverAsDistributor();
+            } else {
+                console.log('[encedo] Distributor left — sending pub to new distributor', this.distributorId);
+                this._sendPubWithRetry(this.distributorId, PUB_MAX_RETRIES);
+            }
+        } else if (this.isDistributor) {
+            this._rekey(`leave ${peerId}`);
+        }
     }
 
-    private async _rekeyAndDistribute(newPeerId: string | null) {
-        this.roomKey = crypto.getRandomValues(new Uint8Array(16));
-        console.log('[encedo] Rekey —', newPeerId ? `peer joined: ${newPeerId}` : 'peer left', ', index', this.keyIndex);
-        this._applyRoomKey();
+    private async _takeOverAsDistributor() {
+        this.peerPubs.clear();
+        this.peerWrapKeys.clear();
+        this.roomKey = crypto.getRandomValues(new Uint8Array(32));
+        const epoch = this.keyIndex++;
+        console.log('[encedo] Taking over as distributor, epoch', epoch);
+        this._setKey(epoch);
+        // Remaining peers send us their kyber-pub (triggered by their onParticipantLeft)
+        // _handlePub will send them the room key with epoch = keyIndex - 1
+    }
+
+    private async _rekey(reason: string) {
+        this.roomKey = crypto.getRandomValues(new Uint8Array(32));
+        const epoch = this.keyIndex++;
+        console.log('[encedo] Rekey:', reason, 'epoch', epoch);
+        this._setKey(epoch);
         for (const [peerId, wrapKey] of this.peerWrapKeys) {
             await this._sendRoomKey(peerId, wrapKey);
         }
@@ -116,7 +155,12 @@ export class EncedoKeyProvider {
         if (!this.keypair || retriesLeft <= 0) return;
 
         console.log('[encedo] Sending kyber-pub to', peerId, `(retries: ${retriesLeft})`);
-        this.bridge.sendOlmMessage(peerId, MSG_PUB, { pub: Array.from(this.keypair.publicKey) });
+        this.bridge.sendOlmMessage(peerId, MSG_PUB, {
+            pub: Array.from(this.keypair.publicKey),
+            // TODO(hsm-attest): sig = HSM.exdsaSign(kid, pub || channelId || sessionNonce)
+            sig: null,
+            kid: null,
+        });
 
         setTimeout(() => {
             if (!this.peerWrapKeys.has(peerId)) {
@@ -131,15 +175,17 @@ export class EncedoKeyProvider {
         } else if (type === MSG_CT) {
             await this._handleCt(from, new Uint8Array(payload.ct));
         } else if (type === MSG_ROOM_KEY) {
-            await this._handleRoomKey(from, payload.wrapped, payload.iv);
+            await this._handleRoomKey(from, payload.wrapped, payload.iv, payload.epoch);
         }
     }
 
     private async _handlePub(from: string, peerPub: Uint8Array) {
-        // Only distributor handles incoming pubs
         if (!this.isDistributor || this.peerPubs.has(from)) return;
 
-        console.log('[encedo] Received kyber-pub from', from, 'pub size:', peerPub.length);
+        console.log('[encedo] Received kyber-pub from', from);
+        // TODO(hsm-attest): verify peerPub against payload.sig using payload.kid's HSM public key
+        //   peerHsmPub = await directory.lookup(payload.kid)
+        //   if (!verifyExdsa(peerHsmPub, payload.sig, peerPub || channelId || sessionNonce)) return;
         this.peerPubs.set(from, peerPub);
 
         const { ciphertext, sharedSecret } = encapsulate(peerPub);
@@ -152,39 +198,44 @@ export class EncedoKeyProvider {
     }
 
     private async _handleCt(from: string, ciphertext: Uint8Array) {
-        // Only joiners receive ct from the distributor
         if (this.isDistributor || !this.keypair || this.peerWrapKeys.has(from)) return;
 
         console.log('[encedo] Received kyber-ct from', from);
         const sharedSecret = decapsulate(ciphertext, this.keypair.secretKey);
         const wrapKey = await deriveWrapKey(sharedSecret);
         this.peerWrapKeys.set(from, wrapKey);
-        // room-key arrives in a separate message
+        // room-key arrives in the next message
     }
 
-    private async _handleRoomKey(from: string, wrapped: number[], iv: number[]) {
+    private async _handleRoomKey(from: string, wrapped: number[], iv: number[], epoch: number) {
         const wrapKey = this.peerWrapKeys.get(from);
         if (!wrapKey) {
-            console.log('[encedo] No wrap key for', from, '— room-key dropped (ct not yet received)');
+            console.log('[encedo] No wrap key for', from, '— room-key dropped');
             return;
         }
 
         const roomKey = await decryptRoomKey(wrapKey, wrapped, iv);
         this.roomKey = roomKey;
-        console.log('[encedo] Room key received from', from, ', index', this.keyIndex);
-        this._applyRoomKey();
+        this.keyIndex = epoch + 1; // stay in sync with distributor's epoch counter
+        console.log('[encedo] Room key received from', from, 'epoch', epoch, 'key', toHex(roomKey));
+        this._setKey(epoch);
     }
 
     private async _sendRoomKey(peerId: string, wrapKey: CryptoKey) {
         if (!this.roomKey) return;
+        const epoch = this.keyIndex - 1; // current active epoch
         const { wrapped, iv } = await encryptRoomKey(wrapKey, this.roomKey);
-        console.log('[encedo] Sending room-key to', peerId);
-        this.bridge.sendOlmMessage(peerId, MSG_ROOM_KEY, { wrapped, iv });
+        console.log('[encedo] Sending room-key to', peerId, 'epoch', epoch);
+        this.bridge.sendOlmMessage(peerId, MSG_ROOM_KEY, { wrapped, iv, epoch });
     }
 
-    private _applyRoomKey() {
+    private _setKey(epoch: number) {
         if (!this.roomKey) return;
-        console.log('[encedo] Applying room key, index', this.keyIndex);
-        this.bridge.setMediaKey(this.roomKey, this.keyIndex++);
+        console.log('[encedo] Applying room key, epoch', epoch, 'key', toHex(this.roomKey));
+        this.bridge.setMediaKey(this.roomKey, epoch);
+    }
+
+    private _lowestId(): string {
+        return [...this.participantIds].sort()[0] ?? this.myId;
     }
 }

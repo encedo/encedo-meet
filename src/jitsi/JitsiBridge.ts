@@ -14,7 +14,14 @@ export class JitsiBridge {
                 e2ee: {
                     externallyManagedKey: true,
                     externallyManagedSharedKey: true
-                }
+                },
+                toolbarButtons: [
+                    'microphone', 'camera', 'desktop',
+                    'chat',
+                    'participants-pane', 'tileview', 'fullscreen',
+                    'settings', 'hangup'
+                    // TODO: remove 'chat' when E2EE chat overlay is ready
+                ]
             },
             parentNode: container,
             roomName
