@@ -22,7 +22,7 @@ export function decapsulate(ciphertext: Uint8Array, secretKey: Uint8Array): Uint
 }
 
 export async function deriveMediaKey(sharedSecret: Uint8Array): Promise<Uint8Array> {
-    const keyMaterial = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, [ 'deriveBits' ]);
+    const keyMaterial = await crypto.subtle.importKey('raw', sharedSecret.slice(), 'HKDF', false, [ 'deriveBits' ]);
     const bits = await crypto.subtle.deriveBits(
         {
             hash: 'SHA-256',

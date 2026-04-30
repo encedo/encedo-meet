@@ -9,7 +9,7 @@ const PUB_RETRY_INTERVAL_MS = 1000;
 const PUB_MAX_RETRIES = 10;
 
 async function deriveWrapKey(sharedSecret: Uint8Array): Promise<CryptoKey> {
-    const material = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, ['deriveKey']);
+    const material = await crypto.subtle.importKey('raw', sharedSecret.slice(), 'HKDF', false, ['deriveKey']);
     return crypto.subtle.deriveKey(
         {
             name: 'HKDF',
@@ -26,7 +26,7 @@ async function deriveWrapKey(sharedSecret: Uint8Array): Promise<CryptoKey> {
 
 async function encryptRoomKey(wrapKey: CryptoKey, roomKey: Uint8Array): Promise<{ wrapped: number[]; iv: number[] }> {
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, roomKey);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, roomKey.slice());
     return { wrapped: Array.from(new Uint8Array(ct)), iv: Array.from(iv) };
 }
 
@@ -210,9 +210,10 @@ export class EncedoKeyProvider {
             //   const valid = verifyExdsa(peerHsmPub, sig, concat(peerPub, channelId, sessionNonce));
             //   if (!valid) { this._panic(`invalid HSM signature from ${from} (kid=${kid})`); return; }
             console.log('[encedo] HSM signature present but verification not yet implemented — accepting');
+        } else if (!DEV) {
+            this._panic(`missing HSM signature from ${from}`);
+            return;
         } else {
-            // No signature — allowed only in dev/testing (no HSM connected).
-            // In production builds this should trigger PANIC.
             console.warn('[encedo] WARNING: no HSM signature from', from, '— accepted (dev mode only)');
         }
 
