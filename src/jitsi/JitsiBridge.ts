@@ -28,7 +28,10 @@ export class JitsiBridge {
     }
 
     onConferenceJoined(cb: ConferenceJoinedHandler) {
-        this.api.addListener('videoConferenceJoined', (e: any) => cb(e.id));
+        this.api.addListener('videoConferenceJoined', (e: any) => {
+            this.api.executeCommand('toggleE2EE', true);
+            cb(e.id);
+        });
     }
 
     onParticipantJoined(cb: ParticipantJoinedHandler) {
