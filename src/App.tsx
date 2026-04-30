@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { EncedoKeyProvider } from './encedo/EncedoKeyProvider';
 import { JitsiBridge } from './jitsi/JitsiBridge';
 
-const JITSI_DOMAIN = 'localhost:8080';
+const JITSI_DOMAIN = import.meta.env.VITE_JITSI_DOMAIN ?? 'localhost:8080';
 const ROOM_NAME = 'testroom';
 
 function PanicOverlay() {
