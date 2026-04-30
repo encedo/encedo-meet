@@ -13,6 +13,11 @@ services:
             - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
             - caddy_data:/data
             - caddy_config:/config
+        environment:
+            - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+            - MEET_DOMAIN=${MEET_DOMAIN}
+            - API_DOMAIN=${API_DOMAIN}
+            - MEET_DOMAIN_URL=${MEET_DOMAIN_URL}
         networks:
             - meet.jitsi
         depends_on:
