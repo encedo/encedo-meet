@@ -1,0 +1,14 @@
+# Nie wysyłaj do daemon build context (oszczędność czasu i pamięci)
+jitsi-meet/node_modules
+jitsi-meet/build
+jitsi-meet/libs
+jitsi-meet/.git
+lib-jitsi-meet/node_modules
+lib-jitsi-meet/dist
+lib-jitsi-meet/.git
+encedo-meet-host/node_modules
+encedo-meet-host/dist
+docker-jitsi-meet
+hem-sdk-js
+.git
+*.md

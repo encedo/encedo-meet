@@ -1,0 +1,31 @@
+{
+    email {$LETSENCRYPT_EMAIL}
+}
+
+# -----------------------------------------------------------------------
+# meet.encedo.com — encedo-meet-host (React app, wejście dla użytkowników)
+# -----------------------------------------------------------------------
+{$MEET_DOMAIN} {
+    reverse_proxy encedo-host:80
+}
+
+# -----------------------------------------------------------------------
+# api.meet.encedo.com — Jitsi Meet (ładowany w iframe przez meet.encedo.com)
+# -----------------------------------------------------------------------
+{$API_DOMAIN} {
+    # Blokuj bezpośrednie otwarcie w przeglądarce (Accept: text/html bez Referer)
+    @direct {
+        header Accept *text/html*
+        not header Referer {$MEET_DOMAIN_URL}*
+    }
+    respond @direct "403 Forbidden" 403
+
+    # Blokuj embedding przez obce strony
+    header Content-Security-Policy "frame-ancestors https://{$MEET_DOMAIN}"
+
+    # Rate limiting — 60 requestów/minutę per IP
+    # (wymaga modułu caddy-ratelimit, bez niego zakomentuj)
+    # rate_limit {remote.ip} 60r/m
+
+    reverse_proxy web:80
+}
