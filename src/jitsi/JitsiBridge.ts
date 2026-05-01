@@ -47,6 +47,7 @@ export class JitsiBridge {
     }
 
     sendOlmMessage(participantId: string, type: string, payload: unknown) {
+        console.log(`[encedo:olm] JitsiBridge.sendOlmMessage to=${participantId} type=${type}`);
         this.api.executeCommand('sendOlmMessage', participantId, type, JSON.stringify(payload));
     }
 
