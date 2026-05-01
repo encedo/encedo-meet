@@ -38,16 +38,19 @@ case "$TARGET" in
     jitsi)
         build_lib
         build_jitsi
+        cd "$ROOT"
         docker compose restart web
         ;;
     host)
         build_host
+        cd "$ROOT"
         docker compose restart encedo-host
         ;;
     all)
         build_lib
         build_jitsi
         build_host
+        cd "$ROOT"
         docker compose restart web encedo-host
         ;;
     *)
@@ -57,4 +60,5 @@ case "$TARGET" in
 esac
 
 echo "==> Gotowe."
+cd "$ROOT"
 docker compose ps web encedo-host
