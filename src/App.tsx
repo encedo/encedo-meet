@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { EncedoKeyProvider } from './encedo/EncedoKeyProvider';
+import { HsmAuth, HsmAuthResult } from './encedo/HsmAuth';
 import { JitsiBridge } from './jitsi/JitsiBridge';
 
 const JITSI_DOMAIN = import.meta.env.VITE_JITSI_DOMAIN ?? `api.${window.location.host}`;
 const ROOM_NAME = 'testroom';
+
+function getNonceFromUrl(): string {
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    return hashParams.get('n') ?? 'placeholder-nonce';
+}
 
 function PanicOverlay() {
     return (
@@ -39,7 +45,7 @@ function PanicOverlay() {
     );
 }
 
-export default function App() {
+function MeetingView({ hsmAuth, nonce }: { hsmAuth: HsmAuthResult; nonce: string }) {
     const containerRef = useRef<HTMLDivElement>(null);
     const [ panicked, setPanicked ] = useState(false);
 
@@ -55,7 +61,7 @@ export default function App() {
                 return;
             }
             bridge = new JitsiBridge(containerRef.current, JITSI_DOMAIN, ROOM_NAME);
-            const provider = new EncedoKeyProvider(bridge);
+            const provider = new EncedoKeyProvider(bridge, { hsm: hsmAuth, nonce, channelId: ROOM_NAME });
 
             provider.onPanic(reason => {
                 console.error('[encedo] PANIC — dropping call:', reason);
@@ -91,7 +97,7 @@ export default function App() {
         }
 
         return () => bridge?.dispose();
-    }, []);
+    }, [ hsmAuth, nonce ]);
 
     return (
         <>
@@ -102,4 +108,19 @@ export default function App() {
             { panicked && <PanicOverlay /> }
         </>
     );
+}
+
+export default function App() {
+    const [ hsmAuth, setHsmAuth ] = useState<HsmAuthResult | null>(null);
+    const [ nonce ] = useState(getNonceFromUrl);
+
+    useEffect(() => {
+        console.log('[encedo] nonce from URL fragment:', nonce);
+    }, [ nonce ]);
+
+    if (!hsmAuth) {
+        return <HsmAuth onReady={ setHsmAuth } />;
+    }
+
+    return <MeetingView hsmAuth={ hsmAuth } nonce={ nonce } />;
 }

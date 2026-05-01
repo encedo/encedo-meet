@@ -1,4 +1,5 @@
 import { JitsiBridge } from '../jitsi/JitsiBridge';
+import type { HsmAuthResult } from './HsmAuth';
 import type { MlKemKeypair } from './mlKem';
 import { decapsulate, encapsulate, generateKeypair } from './mlKem';
 
@@ -34,6 +35,18 @@ function toHex(b: Uint8Array): string {
     return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
+function base64ToBytes(b64: string): Uint8Array {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+function base64UrlToBytes(b64u: string): Uint8Array {
+    const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64u.length % 4)) % 4);
+    return base64ToBytes(b64);
+}
+
 const REQUIRE_HSM = import.meta.env.VITE_REQUIRE_HSM === 'true';
 
 async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[]): Promise<Uint8Array> {
@@ -47,18 +60,22 @@ async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[
 
 export type PanicHandler = (reason: string) => void;
 
+export interface EncedoOptions {
+    hsm: HsmAuthResult;
+    nonce: string;
+    channelId?: string;
+}
+
 export class EncedoKeyProvider {
     private bridge: JitsiBridge;
+    private opts: EncedoOptions;
     private myId = '';
     private keypair: MlKemKeypair | null = null;
 
-    // Participant tracking — distributorId is always min(participantIds)
     private participantIds = new Set<string>();
     private distributorId = '';
 
     private roomKey: Uint8Array | null = null;
-    // keyIndex tracks the next available slot. Current active epoch = keyIndex - 1.
-    // All participants must set the same epoch for SFrame to match during decryption.
     private keyIndex = 0;
 
     private peerPubs = new Map<string, Uint8Array>();
@@ -71,8 +88,9 @@ export class EncedoKeyProvider {
         return this.distributorId === this.myId;
     }
 
-    constructor(bridge: JitsiBridge) {
+    constructor(bridge: JitsiBridge, opts: EncedoOptions) {
         this.bridge = bridge;
+        this.opts = opts;
     }
 
     onPanic(cb: PanicHandler) {
@@ -85,10 +103,54 @@ export class EncedoKeyProvider {
         this.panicHandler?.(reason);
     }
 
+    /**
+     * Build the bytes that get signed by HSM:
+     *   kyberPub || channelId || nonce
+     */
+    private _attestData(kyberPub: Uint8Array): Uint8Array {
+        const channelBytes = new TextEncoder().encode(this.opts.channelId ?? '');
+        const nonceBytes = new TextEncoder().encode(this.opts.nonce);
+        const out = new Uint8Array(kyberPub.length + channelBytes.length + nonceBytes.length);
+        out.set(kyberPub, 0);
+        out.set(channelBytes, kyberPub.length);
+        out.set(nonceBytes, kyberPub.length + channelBytes.length);
+        return out;
+    }
+
+    private async _signKyberPub(kyberPub: Uint8Array): Promise<string> {
+        const data = this._attestData(kyberPub);
+        const sig = await this.opts.hsm.hem.exdsaSignBytes(this.opts.hsm.useToken, this.opts.hsm.kid, data);
+        console.log('[encedo:hsm] signed kyber-pub kid=', this.opts.hsm.kid, 'sigLen=', sig.length);
+        return sig;
+    }
+
+    private async _verifyPeerSig(
+        peerKyberPub: Uint8Array,
+        sig: string,
+        peerPubKeyBase64: string
+    ): Promise<boolean> {
+        try {
+            const pubBytes = base64ToBytes(peerPubKeyBase64);
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw',
+                pubBytes,
+                { name: 'Ed25519' },
+                false,
+                [ 'verify' ]
+            );
+            const sigBytes = base64UrlToBytes(sig);
+            const data = this._attestData(peerKyberPub);
+            return await crypto.subtle.verify('Ed25519', cryptoKey, sigBytes, data);
+        } catch (e) {
+            console.error('[encedo:hsm] verify exception', e);
+            return false;
+        }
+    }
+
     start(myId: string, currentPeerIds: string[]) {
         this.myId = myId;
         this.keypair = generateKeypair();
-        this.participantIds = new Set([myId, ...currentPeerIds]);
+        this.participantIds = new Set([ myId, ...currentPeerIds ]);
         this.distributorId = this._lowestId();
 
         console.log('[encedo] start myId:', myId, 'distributor:', this.distributorId);
@@ -121,7 +183,6 @@ export class EncedoKeyProvider {
         if (this.isDistributor && prevDistributorId === this.myId) {
             this._rekey(`join ${peerId}`);
         } else if (prevDistributorId !== this.distributorId) {
-            // Distributor changed because new peer has lower ID
             this._sendPubWithRetry(this.distributorId, PUB_MAX_RETRIES);
         }
     }
@@ -153,8 +214,6 @@ export class EncedoKeyProvider {
         const epoch = this.keyIndex++;
         console.log('[encedo] Taking over as distributor, epoch', epoch);
         this._setKey(epoch);
-        // Remaining peers send us their kyber-pub (triggered by their onParticipantLeft)
-        // _handlePub will send them the room key with epoch = keyIndex - 1
     }
 
     private async _rekey(reason: string) {
@@ -162,20 +221,26 @@ export class EncedoKeyProvider {
         const epoch = this.keyIndex++;
         console.log('[encedo] Rekey:', reason, 'epoch', epoch);
         this._setKey(epoch);
-        for (const [peerId, wrapKey] of this.peerWrapKeys) {
+        for (const [ peerId, wrapKey ] of this.peerWrapKeys) {
             await this._sendRoomKey(peerId, wrapKey);
         }
     }
 
-    private _sendPubWithRetry(peerId: string, retriesLeft: number) {
+    private async _sendPubWithRetry(peerId: string, retriesLeft: number) {
         if (!this.keypair || retriesLeft <= 0) return;
+
+        const sig = await this._signKyberPub(this.keypair.publicKey).catch(e => {
+            console.error('[encedo:hsm] sign failed', e);
+            return null;
+        });
 
         console.log('[encedo] Sending kyber-pub to', peerId, `(retries: ${retriesLeft})`);
         this.bridge.sendOlmMessage(peerId, MSG_PUB, {
             pub: Array.from(this.keypair.publicKey),
-            // TODO(hsm-attest): sig = HSM.exdsaSign(kid, pub || channelId || sessionNonce)
-            sig: null,
-            kid: null,
+            sig,
+            kid: this.opts.hsm.kid,
+            pubKey: this.opts.hsm.pubKey,
+            descr: this.opts.hsm.descrPayload,
         });
 
         setTimeout(() => {
@@ -187,7 +252,14 @@ export class EncedoKeyProvider {
 
     private async _onOlmMessage(from: string, type: string, payload: any) {
         if (type === MSG_PUB) {
-            await this._handlePub(from, new Uint8Array(payload.pub), payload.sig ?? null, payload.kid ?? null);
+            await this._handlePub(
+                from,
+                new Uint8Array(payload.pub),
+                payload.sig ?? null,
+                payload.kid ?? null,
+                payload.pubKey ?? null,
+                payload.descr ?? null
+            );
         } else if (type === MSG_CT) {
             await this._handleCt(from, new Uint8Array(payload.ct));
         } else if (type === MSG_ROOM_KEY) {
@@ -195,22 +267,40 @@ export class EncedoKeyProvider {
         }
     }
 
-    private async _handlePub(from: string, peerPub: Uint8Array, sig: string | null, kid: string | null) {
+    private async _handlePub(
+        from: string,
+        peerPub: Uint8Array,
+        sig: string | null,
+        kid: string | null,
+        peerPubKey: string | null,
+        descr: string | null
+    ) {
         if (!this.isDistributor || this.peerPubs.has(from)) return;
 
-        console.log('[encedo] Received kyber-pub from', from, 'kid:', kid);
+        console.log('[encedo] Received kyber-pub from', from, 'kid:', kid, 'descr:', descr);
 
-        if (sig !== null && kid !== null) {
-            // TODO(hsm-attest): verify peerPub against sig using kid's HSM public key
-            //   const peerHsmPub = await directory.lookup(kid);
-            //   const valid = verifyExdsa(peerHsmPub, sig, concat(peerPub, channelId, sessionNonce));
-            //   if (!valid) { this._panic(`invalid HSM signature from ${from} (kid=${kid})`); return; }
-            console.log('[encedo] HSM signature present but verification not yet implemented — accepting');
+        if (sig !== null && kid !== null && peerPubKey !== null) {
+            const valid = await this._verifyPeerSig(peerPub, sig, peerPubKey);
+            if (valid) {
+                console.log('[encedo:hsm] HSM signature verified OK from', from);
+            } else {
+                console.warn(
+                    '[encedo:hsm] WARNING: HSM signature verification FAILED from', from,
+                    '— accepted anyway (HSM testing phase; set VITE_REQUIRE_HSM=true to enforce)'
+                );
+                if (REQUIRE_HSM) {
+                    this._panic(`invalid HSM signature from ${from} (kid=${kid})`);
+                    return;
+                }
+            }
         } else if (REQUIRE_HSM) {
             this._panic(`missing HSM signature from ${from}`);
             return;
         } else {
-            console.warn('[encedo] WARNING: no HSM signature from', from, '— accepted (HSM integration pending; set VITE_REQUIRE_HSM=true to enforce)');
+            console.warn(
+                '[encedo] WARNING: no HSM signature/kid/pubKey from', from,
+                '— accepted (HSM testing phase; set VITE_REQUIRE_HSM=true to enforce)'
+            );
         }
 
         this.peerPubs.set(from, peerPub);
@@ -231,7 +321,6 @@ export class EncedoKeyProvider {
         const sharedSecret = decapsulate(ciphertext, this.keypair.secretKey);
         const wrapKey = await deriveWrapKey(sharedSecret);
         this.peerWrapKeys.set(from, wrapKey);
-        // room-key arrives in the next message
     }
 
     private async _handleRoomKey(from: string, wrapped: number[], iv: number[], epoch: number) {
@@ -243,14 +332,14 @@ export class EncedoKeyProvider {
 
         const roomKey = await decryptRoomKey(wrapKey, wrapped, iv);
         this.roomKey = roomKey;
-        this.keyIndex = epoch + 1; // stay in sync with distributor's epoch counter
+        this.keyIndex = epoch + 1;
         console.log('[encedo] Room key received from', from, 'epoch', epoch, 'key', toHex(roomKey));
         this._setKey(epoch);
     }
 
     private async _sendRoomKey(peerId: string, wrapKey: CryptoKey) {
         if (!this.roomKey) return;
-        const epoch = this.keyIndex - 1; // current active epoch
+        const epoch = this.keyIndex - 1;
         const { wrapped, iv } = await encryptRoomKey(wrapKey, this.roomKey);
         console.log('[encedo] Sending room-key to', peerId, 'epoch', epoch);
         this.bridge.sendOlmMessage(peerId, MSG_ROOM_KEY, { wrapped, iv, epoch });
@@ -263,6 +352,6 @@ export class EncedoKeyProvider {
     }
 
     private _lowestId(): string {
-        return [...this.participantIds].sort()[0] ?? this.myId;
+        return [ ...this.participantIds ].sort()[0] ?? this.myId;
     }
 }
