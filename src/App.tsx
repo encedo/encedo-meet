@@ -48,31 +48,49 @@ export default function App() {
             return;
         }
 
-        const bridge = new JitsiBridge(containerRef.current, JITSI_DOMAIN, ROOM_NAME);
-        const provider = new EncedoKeyProvider(bridge);
+        let bridge: JitsiBridge | null = null;
 
-        provider.onPanic(reason => {
-            console.error('[encedo] PANIC — dropping call:', reason);
-            setPanicked(true);
-        });
+        const init = () => {
+            if (!containerRef.current) {
+                return;
+            }
+            bridge = new JitsiBridge(containerRef.current, JITSI_DOMAIN, ROOM_NAME);
+            const provider = new EncedoKeyProvider(bridge);
 
-        bridge.onConferenceJoined(myId => {
-            const currentPeerIds = bridge.getParticipants().map(p => p.participantId);
-            console.log('[encedo] Conference joined, myId:', myId, 'peers:', currentPeerIds);
-            provider.start(myId, currentPeerIds);
-        });
+            provider.onPanic(reason => {
+                console.error('[encedo] PANIC — dropping call:', reason);
+                setPanicked(true);
+            });
 
-        bridge.onParticipantJoined(peerId => {
-            console.log('[encedo] Participant joined:', peerId);
-            provider.onParticipantJoined(peerId);
-        });
+            bridge.onConferenceJoined(myId => {
+                const currentPeerIds = bridge!.getParticipants().map(p => p.participantId);
+                console.log('[encedo] Conference joined, myId:', myId, 'peers:', currentPeerIds);
+                provider.start(myId, currentPeerIds);
+            });
 
-        bridge.onParticipantLeft(peerId => {
-            console.log('[encedo] Participant left:', peerId);
-            provider.onParticipantLeft(peerId);
-        });
+            bridge.onParticipantJoined(peerId => {
+                console.log('[encedo] Participant joined:', peerId);
+                provider.onParticipantJoined(peerId);
+            });
 
-        return () => bridge.dispose();
+            bridge.onParticipantLeft(peerId => {
+                console.log('[encedo] Participant left:', peerId);
+                provider.onParticipantLeft(peerId);
+            });
+        };
+
+        if ((window as unknown as { JitsiMeetExternalAPI?: unknown }).JitsiMeetExternalAPI) {
+            init();
+        } else {
+            const script = document.createElement('script');
+            script.src = `https://${JITSI_DOMAIN}/libs/external_api.js`;
+            script.async = false;
+            script.onload = init;
+            script.onerror = () => console.error('[encedo] failed to load external_api.js from', script.src);
+            document.head.appendChild(script);
+        }
+
+        return () => bridge?.dispose();
     }, []);
 
     return (
