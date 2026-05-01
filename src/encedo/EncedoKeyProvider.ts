@@ -47,6 +47,12 @@ function base64UrlToBytes(b64u: string): Uint8Array {
     return base64ToBytes(b64);
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 const REQUIRE_HSM = import.meta.env.VITE_REQUIRE_HSM === 'true';
 
 async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[]): Promise<Uint8Array> {
@@ -119,8 +125,12 @@ export class EncedoKeyProvider {
 
     private async _signKyberPub(kyberPub: Uint8Array): Promise<string> {
         const data = this._attestData(kyberPub);
-        const sig = await this.opts.hsm.hem.exdsaSignBytes(this.opts.hsm.useToken, this.opts.hsm.kid, data);
-        console.log('[encedo:hsm] signed kyber-pub kid=', this.opts.hsm.kid, 'sigLen=', sig.length);
+        // hem-sdk's exdsaSignBytes actually returns Uint8Array despite .d.ts typing.
+        const sigBytes = await this.opts.hsm.hem.exdsaSignBytes(
+            this.opts.hsm.useToken, this.opts.hsm.kid, data
+        ) as unknown as Uint8Array;
+        const sig = bytesToBase64Url(sigBytes);
+        console.log('[encedo:hsm] signed kyber-pub kid=', this.opts.hsm.kid, 'sigLen=', sigBytes.length, 'sigB64u=', sig);
         return sig;
     }
 

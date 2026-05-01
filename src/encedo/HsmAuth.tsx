@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { HEM, HemError, HemKey } from '../vendor/hem-sdk';
+import { HEM, HemError, type HemKey } from '../vendor/hem-sdk';
 
 const LS_HSM_URL = 'encedo_meet_hsm_url';
 const ETSEVC_PREFIX = 'ETSEVC';
@@ -10,7 +10,7 @@ export interface HsmAuthResult {
     kid: string;
     label: string;
     pubKey: string;       // base64
-    descrPayload: string; // ETSEVC:<uuid>[:<email>] payload after prefix
+    descrPayload: string; // <uuid>[:<email>] payload after ETSEVC: prefix
 }
 
 interface KeyOption {
@@ -18,6 +18,8 @@ interface KeyOption {
     label: string;
     descrPayload: string;
 }
+
+type Mode = 'login' | 'create' | 'keys';
 
 function decodeEvcDescr(description: Uint8Array | null): string | null {
     if (!description) return null;
@@ -27,10 +29,6 @@ function decodeEvcDescr(description: Uint8Array | null): string | null {
     } catch {
         return null;
     }
-}
-
-function btoaUtf8(s: string): string {
-    return btoa(s);
 }
 
 function hemErrMsg(err: unknown): string {
@@ -43,10 +41,13 @@ function hemErrMsg(err: unknown): string {
 }
 
 export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
+    const [ mode, setMode ] = useState<Mode>('login');
     const [ hsmUrl, setHsmUrl ] = useState('');
     const [ passphrase, setPassphrase ] = useState('');
-    const [ keys, setKeys ] = useState<KeyOption[] | null>(null);
+    const [ keys, setKeys ] = useState<KeyOption[]>([]);
     const [ selectedKid, setSelectedKid ] = useState('');
+    const [ createLabel, setCreateLabel ] = useState('');
+    const [ createEmail, setCreateEmail ] = useState('');
     const [ status, setStatus ] = useState('');
     const [ err, setErr ] = useState('');
     const [ busy, setBusy ] = useState(false);
@@ -78,12 +79,15 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
             const listToken = await h.authorizePassword(passphrase, 'keymgmt:search');
 
             setStatus('Searching ETSEVC keys...');
-            const found = await h.searchKeys(listToken, '^' + btoaUtf8(ETSEVC_PREFIX));
+            // hem-sdk.browser.js wraps the prefix as '^' + base64(descr) — pass raw prefix.
+            const found = await h.searchKeys(listToken, ETSEVC_PREFIX);
+
+            setHem(h);
 
             if (found.length === 0) {
-                setErr('No ETSEVC keys on this HSM. Complete enrollment first.');
-                setBusy(false);
                 setStatus('');
+                setBusy(false);
+                setMode('create');
                 return;
             }
 
@@ -93,7 +97,6 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
                 descrPayload: decodeEvcDescr(k.description) ?? ''
             }));
 
-            setHem(h);
             setKeys(opts);
             setSelectedKid(opts[0].kid);
             setStatus('');
@@ -101,9 +104,67 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
 
             if (opts.length === 1) {
                 doAuthorizeKey(h, opts[0]);
+            } else {
+                setMode('keys');
             }
         } catch (e) {
             console.error('[encedo:hsm] search failed', e);
+            setErr(hemErrMsg(e));
+            setBusy(false);
+            setStatus('');
+        }
+    }
+
+    async function doCreateKey() {
+        if (!hem) {
+            setErr('Internal error: no HSM session');
+            return;
+        }
+        if (!createLabel.trim()) {
+            setErr('Label is required');
+            return;
+        }
+
+        setBusy(true);
+        setErr('');
+        setStatus('Authorizing key generation...');
+
+        try {
+            const genToken = await hem.authorizePassword(passphrase, 'keymgmt:gen');
+
+            const uuid = crypto.randomUUID();
+            const email = createEmail.trim();
+            const descrPayload = email ? `${uuid}:${email}` : uuid;
+            const fullDescr = `${ETSEVC_PREFIX}:${descrPayload}`;
+            const descrB64 = btoa(fullDescr);
+
+            console.log('[encedo:hsm] creating key descr=', fullDescr, 'label=', createLabel);
+
+            setStatus('Creating Ed25519 key on HSM...');
+            const { kid } = await hem.createKeyPair(genToken, createLabel.trim(), 'ED25519', descrB64);
+
+            console.log('[encedo:hsm] key created kid=', kid);
+
+            setStatus('Authorizing key use...');
+            const useToken = await hem.authorizePassword(passphrase, `keymgmt:use:${kid}`);
+
+            setStatus('Fetching public key...');
+            const pubKeyResp = await hem.getPubKey(useToken, kid) as unknown as { pubkey?: string } | string;
+            const pubKey = typeof pubKeyResp === 'string' ? pubKeyResp : (pubKeyResp.pubkey ?? '');
+            if (!pubKey) throw new Error('HSM returned no pubkey');
+
+            console.log('[encedo:hsm] enrolled', { kid, label: createLabel, descr: descrPayload, pubKey });
+
+            onReady({
+                hem,
+                useToken,
+                kid,
+                label: createLabel.trim(),
+                pubKey,
+                descrPayload
+            });
+        } catch (e) {
+            console.error('[encedo:hsm] create failed', e);
             setErr(hemErrMsg(e));
             setBusy(false);
             setStatus('');
@@ -119,7 +180,9 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
             const useToken = await activeHem.authorizePassword(passphrase, `keymgmt:use:${opt.kid}`);
 
             setStatus('Fetching public key...');
-            const pubKey = await activeHem.getPubKey(useToken, opt.kid);
+            const pubKeyResp = await activeHem.getPubKey(useToken, opt.kid) as unknown as { pubkey?: string } | string;
+            const pubKey = typeof pubKeyResp === 'string' ? pubKeyResp : (pubKeyResp.pubkey ?? '');
+            if (!pubKey) throw new Error('HSM returned no pubkey');
 
             console.log('[encedo:hsm] authorized', { kid: opt.kid, label: opt.label, descr: opt.descrPayload, pubKey });
 
@@ -140,16 +203,28 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
     }
 
     function onContinue() {
-        if (keys === null) {
+        if (mode === 'login') {
             doSearchKeys();
-        } else {
+        } else if (mode === 'keys') {
             const opt = keys.find(k => k.kid === selectedKid);
             if (!opt) {
                 setErr('Pick a key');
                 return;
             }
             doAuthorizeKey(hem!, opt);
+        } else if (mode === 'create') {
+            doCreateKey();
         }
+    }
+
+    function onBack() {
+        setMode('login');
+        setKeys([]);
+        setSelectedKid('');
+        setCreateLabel('');
+        setCreateEmail('');
+        setErr('');
+        setStatus('');
     }
 
     const wrap: React.CSSProperties = {
@@ -170,12 +245,16 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
         background: '#3b82f6', color: '#fff', fontSize: 14, fontWeight: 600,
         cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1
     };
+    const btnSecondary: React.CSSProperties = {
+        ...btn, background: '#374151'
+    };
 
     return (
         <div style={ wrap }>
             <div style={ card }>
                 <div style={ { fontSize: 20, fontWeight: 700 } }>Encedo Meet — HSM Sign-in</div>
-                { keys === null ? (
+
+                { mode === 'login' && (
                     <>
                         <label style={ { fontSize: 12, color: '#aaa' } }>HSM URL</label>
                         <input
@@ -193,7 +272,9 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
                             onKeyDown={ e => e.key === 'Enter' && !busy && onContinue() }
                             disabled={ busy } />
                     </>
-                ) : (
+                ) }
+
+                { mode === 'keys' && (
                     <>
                         <label style={ { fontSize: 12, color: '#aaa' } }>Select ETSEVC key</label>
                         <select
@@ -209,12 +290,45 @@ export function HsmAuth({ onReady }: { onReady: (r: HsmAuthResult) => void }) {
                     </>
                 ) }
 
+                { mode === 'create' && (
+                    <>
+                        <div style={ { fontSize: 13, color: '#fbbf24' } }>
+                            No ETSEVC keys on this HSM — create one to enroll.
+                        </div>
+                        <label style={ { fontSize: 12, color: '#aaa' } }>Label *</label>
+                        <input
+                            style={ input }
+                            value={ createLabel }
+                            onChange={ e => setCreateLabel(e.target.value) }
+                            placeholder='e.g. My laptop key'
+                            disabled={ busy } />
+                        <label style={ { fontSize: 12, color: '#aaa' } }>Email (optional)</label>
+                        <input
+                            type='email'
+                            style={ input }
+                            value={ createEmail }
+                            onChange={ e => setCreateEmail(e.target.value) }
+                            placeholder='you@example.com'
+                            disabled={ busy } />
+                    </>
+                ) }
+
                 { status && <div style={ { fontSize: 13, color: '#aaa' } }>{ status }</div> }
                 { err && <div style={ { fontSize: 13, color: '#ef4444' } }>{ err }</div> }
 
-                <button style={ btn } onClick={ onContinue } disabled={ busy }>
-                    { busy ? 'Working...' : keys === null ? 'Continue' : 'Use this key' }
-                </button>
+                <div style={ { display: 'flex', gap: 8 } }>
+                    { (mode === 'keys' || mode === 'create') && (
+                        <button style={ btnSecondary } onClick={ onBack } disabled={ busy }>
+                            Back
+                        </button>
+                    ) }
+                    <button style={ { ...btn, flex: 1 } } onClick={ onContinue } disabled={ busy }>
+                        { busy ? 'Working...' :
+                            mode === 'login' ? 'Continue' :
+                                mode === 'keys' ? 'Use this key' :
+                                    'Create key' }
+                    </button>
+                </div>
             </div>
         </div>
     );

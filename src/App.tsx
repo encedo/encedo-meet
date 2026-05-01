@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { EncedoKeyProvider } from './encedo/EncedoKeyProvider';
-import { HsmAuth, HsmAuthResult } from './encedo/HsmAuth';
+import { HsmAuth, type HsmAuthResult } from './encedo/HsmAuth';
 import { JitsiBridge } from './jitsi/JitsiBridge';
 
 const JITSI_DOMAIN = import.meta.env.VITE_JITSI_DOMAIN ?? `api.${window.location.host}`;
