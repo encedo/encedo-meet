@@ -34,11 +34,6 @@ function toHex(b: Uint8Array): string {
     return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
-function keyFingerprint(b: Uint8Array): string {
-    return toHex(b.slice(0, 4)) + '…';
-}
-
-const DEV = import.meta.env.DEV;
 const REQUIRE_HSM = import.meta.env.VITE_REQUIRE_HSM === 'true';
 
 async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[]): Promise<Uint8Array> {
@@ -249,7 +244,7 @@ export class EncedoKeyProvider {
         const roomKey = await decryptRoomKey(wrapKey, wrapped, iv);
         this.roomKey = roomKey;
         this.keyIndex = epoch + 1; // stay in sync with distributor's epoch counter
-        console.log('[encedo] Room key received from', from, 'epoch', epoch, 'key', DEV ? toHex(roomKey) : keyFingerprint(roomKey));
+        console.log('[encedo] Room key received from', from, 'epoch', epoch, 'key', toHex(roomKey));
         this._setKey(epoch);
     }
 
@@ -263,7 +258,7 @@ export class EncedoKeyProvider {
 
     private _setKey(epoch: number) {
         if (!this.roomKey) return;
-        console.log('[encedo] Applying room key, epoch', epoch, 'key', DEV ? toHex(this.roomKey) : keyFingerprint(this.roomKey));
+        console.log('[encedo] Applying room key, epoch', epoch, 'key', toHex(this.roomKey));
         this.bridge.setMediaKey(this.roomKey, epoch);
     }
 
