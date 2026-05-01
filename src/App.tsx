@@ -83,7 +83,7 @@ export default function App() {
             init();
         } else {
             const script = document.createElement('script');
-            script.src = `https://${JITSI_DOMAIN}/libs/external_api.js`;
+            script.src = `https://${JITSI_DOMAIN}/libs/external_api.min.js`;
             script.async = false;
             script.onload = init;
             script.onerror = () => console.error('[encedo] failed to load external_api.js from', script.src);
