@@ -39,6 +39,7 @@ function keyFingerprint(b: Uint8Array): string {
 }
 
 const DEV = import.meta.env.DEV;
+const REQUIRE_HSM = import.meta.env.VITE_REQUIRE_HSM === 'true';
 
 async function decryptRoomKey(wrapKey: CryptoKey, wrapped: number[], iv: number[]): Promise<Uint8Array> {
     const pt = await crypto.subtle.decrypt(
@@ -210,11 +211,11 @@ export class EncedoKeyProvider {
             //   const valid = verifyExdsa(peerHsmPub, sig, concat(peerPub, channelId, sessionNonce));
             //   if (!valid) { this._panic(`invalid HSM signature from ${from} (kid=${kid})`); return; }
             console.log('[encedo] HSM signature present but verification not yet implemented — accepting');
-        } else if (!DEV) {
+        } else if (REQUIRE_HSM) {
             this._panic(`missing HSM signature from ${from}`);
             return;
         } else {
-            console.warn('[encedo] WARNING: no HSM signature from', from, '— accepted (dev mode only)');
+            console.warn('[encedo] WARNING: no HSM signature from', from, '— accepted (HSM integration pending; set VITE_REQUIRE_HSM=true to enforce)');
         }
 
         this.peerPubs.set(from, peerPub);
