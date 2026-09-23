@@ -71,3 +71,7 @@ export default defineConfig([
   },
 ])
 ```
+
+## License
+
+MIT © 2026 Krzysztof Rutecki — see [LICENSE](LICENSE).
